@@ -1,0 +1,1507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>U.S. Income Percentile Explorer</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0e1017;color:#c8cdd5;font-family:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;min-height:100vh}
+  code{background:#1a1d26;padding:2px 6px;border-radius:3px;font-size:13px}
+  input[type=range]{accent-color:#f0c040}
+  select{background:#13151d;color:#c8cdd5;border:1px solid #222530;border-radius:4px;padding:4px 8px;font-size:11px;font-family:monospace}
+  details>summary{cursor:pointer;user-select:none}
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:#0e1017}
+  ::-webkit-scrollbar-thumb{background:#222530;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useMemo, useCallback, useRef, useEffect } = React;
+
+const CPI_U = {
+  1990:130.7,1991:136.2,1992:140.3,1993:144.5,1994:148.2,1995:152.4,
+  1996:156.9,1997:160.5,1998:163.0,1999:166.6,2000:172.2,2001:177.1,
+  2002:179.9,2003:184.0,2004:188.9,2005:195.3,2006:201.6,2007:207.3,
+  2008:215.3,2009:214.5,2010:218.1,2011:224.9,2012:229.6,2013:233.0,
+  2014:236.7,2015:237.0,2016:240.0,2017:245.1,2018:251.1,2019:255.7,
+  2020:258.8,2021:270.9,2022:292.7,2023:304.7,2024:313.0,2025:320.0,
+};
+
+const BASE_CPI_YEAR = 2024;
+
+const PKEYS = ["p1","p5","p10","p25","p50","p75","p90","p95","p99"];
+const PNUMS = [1,5,10,25,50,75,90,95,99];
+const PKEYS_DEFAULT = ["p25","p50","p75","p90"];
+const PLABELS = {
+  p1:"1st",p5:"5th",p10:"10th",p25:"25th",p50:"Median",
+  p75:"75th",p90:"90th",p95:"95th",p99:"Top 1%"
+};
+const PCOLORS = {
+  p1:"#3a5a8a",p5:"#4a6fa5",p10:"#5b84b8",p25:"#6fa8c7",
+  p50:"#f0c040",p75:"#e8883a",p90:"#d04535",p95:"#b82830",p99:"#8b1525"
+};
+
+function customColor(pNum) {
+  const t = pNum / 100;
+  if (t < 0.5) {
+    const s = t / 0.5;
+    return `rgb(${Math.round(58+s*182)},${Math.round(90+s*102)},${Math.round(138-s*74)})`;
+  } else {
+    const s = (t - 0.5) / 0.5;
+    return `rgb(${Math.round(240-s*101)},${Math.round(192-s*171)},${Math.round(64-s*27)})`;
+  }
+}
+
+const RECESSIONS = [[2001,2001],[2007,2009],[2020,2020]];
+
+const COHORT_COLORS = ["#4fc3f7","#81c784","#ffb74d","#e57373","#ba68c8","#4dd0e1","#fff176","#f06292"];
+function cohortColor(i){return COHORT_COLORS[i%COHORT_COLORS.length];}
+function cohortAgeRange(b){
+  const mn=Math.max(16,1995-b),mx=Math.min(75,2025-b);
+  return mn<=mx?{minAge:mn,maxAge:mx,count:mx-mn+1}:null;
+}
+
+function fmt(n){
+  if(n==null)return"—";
+  if(n>=1e6)return"$"+(n/1e6).toFixed(1)+"M";
+  if(n>=1e3)return"$"+Math.round(n/1e3)+"k";
+  return"$"+Math.round(n);
+}
+function fmtFull(n){
+  if(n==null)return"—";
+  return"$"+Math.round(n).toLocaleString();
+}
+function inflate(val,fromYear,toYear=BASE_CPI_YEAR){
+  if(val==null)return null;
+  const from=CPI_U[fromYear],to=CPI_U[toYear];
+  if(!from||!to)return val;
+  return val*(to/from);
+}
+
+function interpPercentile(record, pNum, pfx = "") {
+  if (!record) return null;
+  const key = pfx + "p" + pNum;
+  if (record[key] != null) return record[key];
+  let lo = null, hi = null;
+  for (let i = 0; i < PNUMS.length; i++) {
+    if (PNUMS[i] <= pNum) lo = i;
+    if (PNUMS[i] >= pNum && hi === null) hi = i;
+  }
+  if (lo === null) lo = 0;
+  if (hi === null) hi = PNUMS.length - 1;
+  if (lo === hi) return record[pfx + "p" + PNUMS[lo]] || null;
+  const loP = PNUMS[lo], hiP = PNUMS[hi];
+  const loV = record[pfx + "p" + loP], hiV = record[pfx + "p" + hiP];
+  if (loV == null || hiV == null) return null;
+  const frac = (pNum - loP) / (hiP - loP);
+  return loV + frac * (hiV - loV);
+}
+
+function getSuffix(n){
+  const last=Math.floor(n)%10;
+  const lastTwo=Math.floor(n)%100;
+  if(lastTwo>=11&&lastTwo<=13)return"th";
+  if(last===1)return"st";
+  if(last===2)return"nd";
+  if(last===3)return"rd";
+  return"th";
+}
+
+
+function IncomeExplorer(){
+  const [data,setData]=useState(null);
+  const [mode,setMode]=useState("age");
+  const [selAge,setSelAge]=useState(29);
+  const [selYear,setSelYear]=useState(null);
+  const [cmpYear,setCmpYear]=useState(null);
+  const [selPerc,setSelPerc]=useState(PKEYS_DEFAULT);
+  const [real,setReal]=useState(true);
+  const [crosshair,setCrosshair]=useState(null);
+  const [customPInput,setCustomPInput]=useState("");
+  const [customPercentiles,setCustomPercentiles]=useState([]);
+  const [showEstimated,setShowEstimated]=useState(true);
+  const [afterTax,setAfterTax]=useState(false);
+  // Pin-and-compare state
+  // pinA = first pinned point {xVal, xKey, record, year(for inflate)}
+  // pinB = second pinned point (same shape)
+  // Once both are set, the comparison panel shows below the chart
+  const [pinA,setPinA]=useState(null);
+  const [pinB,setPinB]=useState(null);
+  // Cohort view state
+  const [cohorts,setCohorts]=useState([1970,1980,1990]);
+  const [cohortInput,setCohortInput]=useState("");
+  const [cohortPerc,setCohortPerc]=useState(["p50"]);
+  const [cumRange,setCumRange]=useState(null);
+  const [dragStartAge,setDragStartAge]=useState(null);
+  const svgRef=useRef(null);
+  const dragStartTime=useRef(0);
+  const dragStartPos=useRef({x:0,y:0});
+
+  // Detect if after-tax data is present
+  const hasAfterTax=useMemo(()=>{
+    if(!data)return false;
+    const firstYear=Object.values(data.data)[0];
+    if(!firstYear)return false;
+    const sample=Object.values(firstYear)[0];
+    return sample&&sample.at_p50!=null;
+  },[data]);
+
+  // Detect which years are estimated from metadata or per-record flags
+  const estimatedYears=useMemo(()=>{
+    if(!data)return new Set();
+    const s=new Set();
+    if(data.metadata?.estimated_years){
+      Object.keys(data.metadata.estimated_years).forEach(y=>s.add(y));
+    }
+    // Also check per-record estimated flags
+    if(data.data){
+      Object.entries(data.data).forEach(([yr,ages])=>{
+        const sample=Object.values(ages)[0];
+        if(sample?.estimated)s.add(yr);
+      });
+    }
+    return s;
+  },[data]);
+
+  const handleFile=useCallback(async(e)=>{
+    const file=e.target.files[0];
+    if(!file)return;
+    try{
+      const text=await file.text();
+      const parsed=JSON.parse(text);
+      if(!parsed.data){alert("JSON must have a 'data' key");return;}
+      setData(parsed);
+      const yrs=Object.keys(parsed.data).map(Number).sort((a,b)=>a-b);
+      // Default selected year to latest non-estimated, or just latest
+      const estSet=new Set();
+      if(parsed.metadata?.estimated_years)Object.keys(parsed.metadata.estimated_years).forEach(y=>estSet.add(y));
+      Object.entries(parsed.data).forEach(([yr,ages])=>{const s=Object.values(ages)[0];if(s?.estimated)estSet.add(yr);});
+      const nonEst=yrs.filter(y=>!estSet.has(String(y)));
+      setSelYear(nonEst.length?nonEst[nonEst.length-1]:yrs[yrs.length-1]);
+      setCmpYear(yrs[0]);
+    }catch(err){
+      alert("Error parsing JSON: "+err.message);
+    }
+  },[]);
+
+  const handleDrop=useCallback((e)=>{
+    e.preventDefault();e.stopPropagation();
+    const file=e.dataTransfer.files[0];
+    if(file) handleFile({target:{files:[file]}});
+  },[handleFile]);
+
+  const toggle=useCallback(p=>{
+    setSelPerc(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p]);
+  },[]);
+
+  const addCustomPercentile=useCallback(()=>{
+    const num=parseFloat(customPInput);
+    if(isNaN(num)||num<0||num>100){alert("Enter a number between 0 and 100");return;}
+    const rounded=Math.round(num*10)/10;
+    const key="c"+rounded;
+    if(customPercentiles.find(c=>c.num===rounded))return;
+    if(PNUMS.includes(rounded)){
+      const pk="p"+rounded;
+      if(!selPerc.includes(pk)) setSelPerc(prev=>[...prev,pk]);
+      if(!cohortPerc.includes(pk)) setCohortPerc(prev=>[...prev,pk]);
+      setCustomPInput("");
+      return;
+    }
+    const label=rounded+getSuffix(rounded);
+    const color=customColor(rounded);
+    setCustomPercentiles(prev=>[...prev,{num:rounded,key,label,color}]);
+    setSelPerc(prev=>[...prev,key]);
+    setCohortPerc(prev=>[...prev,key]);
+    setCustomPInput("");
+  },[customPInput,customPercentiles,selPerc,cohortPerc]);
+
+  const removeCustomPercentile=useCallback((key)=>{
+    setCustomPercentiles(prev=>prev.filter(c=>c.key!==key));
+    setSelPerc(prev=>prev.filter(p=>p!==key));
+    setCohortPerc(prev=>prev.filter(p=>p!==key));
+  },[]);
+
+  const allYears=useMemo(()=>data?Object.keys(data.data).map(Number).sort((a,b)=>a-b):[],[data]);
+  const years=useMemo(()=>{
+    if(showEstimated)return allYears;
+    return allYears.filter(y=>!estimatedYears.has(String(y)));
+  },[allYears,showEstimated,estimatedYears]);
+  // Reset selected year if it's estimated and toggle is off
+  useEffect(()=>{
+    if(!showEstimated&&selYear&&estimatedYears.has(String(selYear))){
+      const nonEst=allYears.filter(y=>!estimatedYears.has(String(y)));
+      if(nonEst.length)setSelYear(nonEst[nonEst.length-1]);
+    }
+  },[showEstimated,selYear,estimatedYears,allYears]);
+
+  const ages=useMemo(()=>{
+    if(!data||!selYear)return[];
+    const yd=data.data[String(selYear)];
+    return yd?Object.keys(yd).map(Number).sort((a,b)=>a-b):[];
+  },[data,selYear]);
+
+  const availPerc=useMemo(()=>{
+    if(!data||!years.length)return PKEYS;
+    const sample=data.data[String(years[years.length-1])];
+    if(!sample)return PKEYS;
+    const sampleAge=Object.values(sample)[0];
+    return PKEYS.filter(p=>sampleAge&&p in sampleAge);
+  },[data,years]);
+
+  const percMeta=useMemo(()=>{
+    const map={};
+    PKEYS.forEach(p=>{map[p]={label:PLABELS[p],color:PCOLORS[p],isCustom:false,num:parseInt(p.slice(1))};});
+    customPercentiles.forEach(c=>{map[c.key]={label:c.label,color:c.color,isCustom:true,num:c.num};});
+    return map;
+  },[customPercentiles]);
+
+  const getVal=useCallback((record,pkey)=>{
+    if(!record)return null;
+    const pfx=afterTax?"at_":"";
+    if(pkey.startsWith("p")){
+      const atKey=pfx+pkey;
+      if(record[atKey]!=null)return record[atKey];
+    }
+    const meta=percMeta[pkey];
+    if(!meta)return null;
+    return interpPercentile(record,meta.num,pfx);
+  },[percMeta,afterTax]);
+
+  const isEstYear=useCallback((yr)=>estimatedYears.has(String(yr)),[estimatedYears]);
+  const yrLabel=useCallback((yr)=>isEstYear(yr)?`${yr} (est.)`:String(yr),[isEstYear]);
+
+  // ── Cohort derived data ──
+  const cohortData=useMemo(()=>{
+    if(!data||mode!=="cohort")return[];
+    return cohorts.map((byr,ci)=>{
+      const r=cohortAgeRange(byr);if(!r)return null;
+      const agesArr=[];
+      for(let a=r.minAge;a<=r.maxAge;a++){
+        const cy=byr+a;
+        if(!showEstimated&&estimatedYears.has(String(cy)))continue;
+        if(!data.data[String(cy)]?.[String(a)])continue;
+        agesArr.push(a);
+      }
+      if(!agesArr.length)return null;
+      const allP=[...cohortPerc];
+      const series=allP.map(pk=>{
+        const meta=percMeta[pk];if(!meta)return null;
+        const pts=agesArr.map(a=>{
+          const cy=byr+a;
+          const rec=data.data[String(cy)]?.[String(a)];
+          const raw=rec?getVal(rec,pk):null;
+          if(raw==null)return null;
+          return{age:a,calYear:cy,rawVal:raw,realVal:inflate(raw,cy),isEst:isEstYear(cy)};
+        }).filter(Boolean);
+        return{pkey:pk,meta,points:pts};
+      }).filter(Boolean);
+      return{birthYear:byr,idx:ci,ages:agesArr,series};
+    }).filter(Boolean);
+  },[data,mode,cohorts,cohortPerc,showEstimated,estimatedYears,percMeta,getVal,isEstYear]);
+
+  const cumEarnings=useMemo(()=>{
+    if(!cumRange||!cohortData.length)return null;
+    return cohortData.map(c=>{
+      const percResults=c.series.map(s=>{
+        let nomSum=0,realSum=0,count=0,hasEst=false;
+        s.points.forEach(pt=>{
+          if(pt.age>=cumRange.startAge&&pt.age<=cumRange.endAge){
+            nomSum+=pt.rawVal;realSum+=pt.realVal;count++;
+            if(pt.isEst)hasEst=true;
+          }
+        });
+        const span=cumRange.endAge-cumRange.startAge+1;
+        return{pkey:s.pkey,label:s.meta.label,nomSum,realSum,count,span,missing:span-count,hasEst};
+      });
+      return{birthYear:c.birthYear,color:cohortColor(c.idx),percResults};
+    });
+  },[cumRange,cohortData]);
+
+  // Cohort callbacks
+  const addCohort=useCallback(()=>{
+    const n=parseInt(cohortInput);
+    if(isNaN(n)){alert("Enter a valid year");return;}
+    if(cohorts.includes(n))return;
+    if(!cohortAgeRange(n)){alert(`Birth year ${n} has no data in range (try 1920–2009)`);return;}
+    setCohorts(prev=>[...prev,n].sort((a,b)=>a-b));
+    setCohortInput("");
+  },[cohortInput,cohorts]);
+
+  const removeCohort=useCallback((byr)=>{
+    setCohorts(prev=>prev.filter(y=>y!==byr));
+  },[]);
+
+  const toggleCohortPerc=useCallback((p)=>{
+    setCohortPerc(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p]);
+  },[]);
+
+  const W=820,H=400,M_={t:30,r:68,b:48,l:68};
+  const cW=W-M_.l-M_.r,cH=H-M_.t-M_.b;
+
+  // ── Crosshair: snap to nearest x ──
+  const handleSvgMove=useCallback((e,xVals,xS,yS,xKey)=>{
+    if(!svgRef.current)return;
+    const rect=svgRef.current.getBoundingClientRect();
+    const mx=e.clientX-rect.left;
+    let bestX=null,bestDist=Infinity;
+    xVals.forEach(xv=>{
+      const d=Math.abs(xS(xv)-mx);
+      if(d<bestDist){bestDist=d;bestX=xv;}
+    });
+    if(bestX!=null&&bestDist<40){
+      setCrosshair({xVal:bestX,xPx:xS(bestX),xKey});
+    }else{
+      setCrosshair(null);
+    }
+  },[]);
+
+  // ── Click handler for pin-and-compare ──
+  // Click logic:
+  //   - No pins → click sets pinA
+  //   - pinA set, no pinB → click sets pinB (comparison shows)
+  //   - Both pins set → click clears both and sets new pinA
+  const handleSvgClick=useCallback((xKey)=>{
+    if(!crosshair||crosshair.xKey!==xKey)return;
+    const xVal=crosshair.xVal;
+
+    if(!pinA){
+      // Set first pin
+      setPinA({xVal,xKey});
+      setPinB(null);
+      if(xKey==='cohortAge') setCumRange(null);
+    }else if(!pinB){
+      // Set second pin
+      if(xVal===pinA.xVal){return;} // same point, ignore
+      setPinB({xVal,xKey});
+      // In cohort mode, also set cumulative earnings range
+      if(xKey==='cohortAge'){
+        setCumRange({startAge:Math.min(pinA.xVal,xVal),endAge:Math.max(pinA.xVal,xVal)});
+      }
+    }else{
+      // Both set → clear and start fresh
+      setPinA({xVal,xKey});
+      setPinB(null);
+      if(xKey==='cohortAge') setCumRange(null);
+    }
+  },[crosshair,pinA,pinB]);
+
+  const clearPins=useCallback(()=>{
+    setPinA(null);
+    setPinB(null);
+  },[]);
+
+  // Helper: get record for a pin
+  const getPinRecord=useCallback((pin)=>{
+    if(!pin||!data)return null;
+    if(pin.xKey==='a'){
+      const yr=selYear||years[years.length-1];
+      return data.data[String(yr)]?.[String(pin.xVal)]||null;
+    }else if(pin.xKey==='cohortAge'){
+      // Cohort mode: return null, cohort comparison handled separately
+      return null;
+    }else{
+      return data.data[String(pin.xVal)]?.[String(selAge)]||null;
+    }
+  },[data,selYear,selAge,years]);
+
+  // Helper: get the year to use for inflation for a pin
+  const getPinYear=useCallback((pin)=>{
+    if(!pin)return null;
+    if(pin.xKey==='a'){
+      return selYear||years[years.length-1];
+    }else{
+      return pin.xVal;
+    }
+  },[selYear,years]);
+
+  // Helper: label for a pin
+  const getPinLabel=useCallback((pin)=>{
+    if(!pin)return"";
+    return pin.xKey==='a'?`Age ${pin.xVal}`:`${pin.xVal}`;
+  },[]);
+
+  // ── Render pinned markers on chart ──
+  const renderPins=(xS,yS)=>{
+    const pins=[];
+    [pinA,pinB].forEach((pin,idx)=>{
+      if(!pin)return;
+      const px=xS(pin.xVal);
+      const color=idx===0?"#40a0f0":"#f07040";
+      const label=getPinLabel(pin);
+      pins.push(
+        <g key={"pin"+idx}>
+          <line x1={px} x2={px} y1={M_.t} y2={M_.t+cH}
+            stroke={color} strokeWidth={1.5} opacity={0.7}/>
+          <text x={px} y={M_.t+cH+14} textAnchor="middle" fill={color} fontSize={9}
+            fontWeight={700} style={{fontFamily:"monospace"}}>{idx===0?"A":"B"}: {label}</text>
+          {/* Dots on each active line */}
+          {selPerc.map(p=>{
+            const meta=percMeta[p];if(!meta)return null;
+            const rec=getPinRecord(pin);
+            const rawV=getVal(rec,p);if(rawV==null)return null;
+            const yr=getPinYear(pin);
+            const v=real?inflate(rawV,yr):rawV;
+            return<circle key={p+"pin"+idx} cx={px} cy={yS(v)} r={3.5}
+              fill={color} stroke="#0e1017" strokeWidth={1.5} opacity={0.8}/>;
+          })}
+        </g>
+      );
+    });
+    // Shaded region between pins
+    if(pinA&&pinB){
+      const pxA=xS(pinA.xVal),pxB=xS(pinB.xVal);
+      const left=Math.min(pxA,pxB),right=Math.max(pxA,pxB);
+      pins.unshift(
+        <rect key="pinShade" x={left} y={M_.t} width={right-left} height={cH}
+          fill="#ffffff" opacity={0.03}/>
+      );
+    }
+    return pins;
+  };
+
+  // ── Comparison panel (below chart) ──
+  const renderComparePanel=()=>{
+    if(!pinA||!pinB)return null;
+    const recA=getPinRecord(pinA);
+    const recB=getPinRecord(pinB);
+    if(!recA||!recB)return null;
+    const yrA=getPinYear(pinA);
+    const yrB=getPinYear(pinB);
+    const labelA=getPinLabel(pinA);
+    const labelB=getPinLabel(pinB);
+
+    const rows=selPerc.map(p=>{
+      const meta=percMeta[p];if(!meta)return null;
+      const rawA=getVal(recA,p);
+      const rawB=getVal(recB,p);
+      if(rawA==null||rawB==null)return null;
+      const vA=real?inflate(rawA,yrA):rawA;
+      const vB=real?inflate(rawB,yrB):rawB;
+      const diff=vB-vA;
+      const pctChg=vA!==0?((vB-vA)/vA*100):null;
+      return{key:p,label:meta.label,color:meta.color,vA,vB,diff,pctChg};
+    }).filter(Boolean);
+
+    if(!rows.length)return null;
+
+    return(
+      <div style={{background:"#11131b",borderRadius:8,border:"1px solid #1e2230",padding:"14px 16px",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#e0e2e8"}}>
+            <span style={{color:"#40a0f0"}}>A: {labelA}{isEstYear(yrA)&&<span style={{fontSize:9,color:"#a09060",fontWeight:400}}> (est.)</span>}</span>
+            <span style={{color:"#4a5060",margin:"0 8px"}}>&rarr;</span>
+            <span style={{color:"#f07040"}}>B: {labelB}{isEstYear(yrB)&&<span style={{fontSize:9,color:"#a09060",fontWeight:400}}> (est.)</span>}</span>
+          </div>
+          <button onClick={clearPins} style={{
+            padding:"3px 10px",fontSize:10,fontWeight:600,border:"1px solid #333",borderRadius:4,
+            cursor:"pointer",background:"#1a1d26",color:"#888e9a"
+          }}>Clear pins</button>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
+          <thead>
+            <tr style={{borderBottom:"1px solid #222530"}}>
+              <th style={{textAlign:"left",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Percentile</th>
+              <th style={{textAlign:"right",padding:"5px 8px",color:"#40a0f0",fontWeight:600}}>A: {labelA}{isEstYear(yrA)?" *":""}</th>
+              <th style={{textAlign:"right",padding:"5px 8px",color:"#f07040",fontWeight:600}}>B: {labelB}{isEstYear(yrB)?" *":""}</th>
+              <th style={{textAlign:"right",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>$ Change</th>
+              <th style={{textAlign:"right",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>% Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r=>(
+              <tr key={r.key} style={{borderBottom:"1px solid #161820"}}>
+                <td style={{padding:"4px 8px"}}>
+                  <span style={{display:"inline-block",width:8,height:8,borderRadius:2,background:r.color,marginRight:6,verticalAlign:"middle"}}/>
+                  <span style={{color:"#888e9a"}}>{r.label}</span>
+                </td>
+                <td style={{textAlign:"right",padding:"4px 8px",color:"#c0c5d0"}}>{fmtFull(r.vA)}</td>
+                <td style={{textAlign:"right",padding:"4px 8px",color:"#c0c5d0"}}>{fmtFull(r.vB)}</td>
+                <td style={{textAlign:"right",padding:"4px 8px",color:r.diff>=0?"#7ec87e":"#d04535",fontWeight:600}}>
+                  {r.diff>=0?"+":""}{fmtFull(r.diff)}
+                </td>
+                <td style={{textAlign:"right",padding:"4px 8px",color:r.pctChg!=null?(r.pctChg>=0?"#7ec87e":"#d04535"):"#4a5060",fontWeight:600}}>
+                  {r.pctChg!=null?`${r.pctChg>=0?"+":""}${r.pctChg.toFixed(1)}%`:"—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{fontSize:9,color:"#3a4050",marginTop:8}}>
+          Click anywhere on the chart to set a new A point (clears current comparison). {real?`Values in ${BASE_CPI_YEAR} dollars.`:"Values in nominal dollars."}
+        </div>
+      </div>
+    );
+  };
+
+  // ── Pin status hint below chart ──
+  const renderPinHint=()=>{
+    if(pinA&&pinB)return null; // comparison panel shows instead
+    return(
+      <div style={{fontSize:10,color:"#4a5060",marginBottom:8,fontStyle:"italic"}}>
+        {!pinA
+          ? "Click on the chart to pin point A for comparison."
+          : "Point A pinned. Click another point to compare."}
+        {pinA&&!pinB&&(
+          <button onClick={clearPins} style={{
+            marginLeft:8,padding:"2px 8px",fontSize:9,border:"1px solid #333",borderRadius:3,
+            cursor:"pointer",background:"#1a1d26",color:"#888e9a"
+          }}>Cancel</button>
+        )}
+      </div>
+    );
+  };
+
+  // ── AGE PROFILE VIEW ──
+  const renderAgeChart=()=>{
+    if(!data||!selYear)return null;
+    const yd=data.data[String(selYear)]||{};
+    const ageList=Object.keys(yd).map(Number).sort((a,b)=>a-b);
+    if(!ageList.length)return null;
+
+    const vals=[];
+    ageList.forEach(age=>{
+      const d=yd[String(age)];
+      selPerc.forEach(p=>{
+        const v=getVal(d,p);
+        if(v!=null)vals.push(real?inflate(v,selYear):v);
+      });
+    });
+    if(!vals.length)return null;
+
+    const yMax=Math.max(...vals)*1.08;
+    const xS=a=>M_.l+((a-ageList[0])/(ageList[ageList.length-1]-ageList[0]))*cW;
+    const yS=v=>M_.t+cH-(v/yMax)*cH;
+    const step=yMax>500000?100000:yMax>200000?50000:yMax>100000?25000:10000;
+    const yTicks=[];for(let t=0;t<=yMax;t+=step)yTicks.push(t);
+
+    const chAge=crosshair?.xKey==='a'?crosshair.xVal:null;
+    const chRecord=chAge!=null?yd[String(chAge)]:null;
+
+    return(
+      <svg ref={svgRef} width={W} height={H} style={{display:"block",cursor:"crosshair"}}
+        onMouseMove={e=>handleSvgMove(e,ageList,xS,yS,'a')}
+        onMouseLeave={()=>setCrosshair(null)}
+        onClick={()=>handleSvgClick('a')}>
+        <rect x={M_.l} y={M_.t} width={cW} height={cH} fill="#13151d" rx={2}/>
+        {yTicks.map(t=>(
+          <g key={t}>
+            <line x1={M_.l} x2={W-M_.r} y1={yS(t)} y2={yS(t)} stroke="#222530" strokeWidth={0.5}/>
+            <text x={M_.l-8} y={yS(t)+4} textAnchor="end" fill="#4a5060" fontSize={10}
+              style={{fontFamily:"monospace"}}>{fmt(t)}</text>
+          </g>
+        ))}
+        {ageList.filter(a=>a%5===0).map(a=>(
+          <text key={a} x={xS(a)} y={H-8} textAnchor="middle" fill="#4a5060" fontSize={10}
+            style={{fontFamily:"monospace"}}>{a}</text>
+        ))}
+
+        {/* Current year */}
+        {selPerc.map(p=>{
+          const meta=percMeta[p];if(!meta)return null;
+          const pts=ageList.filter(a=>{const v=getVal(yd[String(a)],p);return v!=null;}).map(a=>({
+            a,v:real?inflate(getVal(yd[String(a)],p),selYear):getVal(yd[String(a)],p)
+          }));
+          if(!pts.length)return null;
+          return(
+            <g key={p}>
+              <path fill="none" stroke={meta.color} strokeWidth={meta.isCustom?2:2.5} strokeLinejoin="round"
+                strokeDasharray={meta.isCustom?"6,3":"none"}
+                d={pts.map((d,i)=>`${i?'L':'M'}${xS(d.a)},${yS(d.v)}`).join(" ")}/>
+              <text x={W-M_.r+5} y={yS(pts[pts.length-1].v)+4} fill={meta.color} fontSize={9}
+                style={{fontFamily:"monospace"}}>{meta.label}</text>
+            </g>
+          );
+        })}
+
+        {/* Pinned markers */}
+        {renderPins(xS,yS)}
+
+        {/* ── CROSSHAIR ── */}
+        {chAge!=null&&(
+          <g>
+            <line x1={crosshair.xPx} x2={crosshair.xPx} y1={M_.t} y2={M_.t+cH}
+              stroke="#888" strokeWidth={1} strokeDasharray="2,2" opacity={0.6}/>
+            <text x={crosshair.xPx} y={M_.t-6} textAnchor="middle" fill="#e0e2e8" fontSize={10}
+              fontWeight={700} style={{fontFamily:"monospace"}}>Age {chAge}</text>
+            {selPerc.map(p=>{
+              const meta=percMeta[p];if(!meta)return null;
+              const rawV=getVal(chRecord,p);
+              if(rawV==null)return null;
+              const v=real?inflate(rawV,selYear):rawV;
+              return<circle key={p+"ch"} cx={crosshair.xPx} cy={yS(v)} r={4}
+                fill={meta.color} stroke="#0e1017" strokeWidth={2}/>;
+            })}
+            {chRecord&&(()=>{
+              const entries=selPerc.map(p=>{
+                const meta=percMeta[p];if(!meta)return null;
+                const rawV=getVal(chRecord,p);if(rawV==null)return null;
+                const v=real?inflate(rawV,selYear):rawV;
+                return{key:p,label:meta.label,color:meta.color,value:v};
+              }).filter(Boolean).sort((a,b)=>b.value-a.value);
+              if(!entries.length)return null;
+              const panelH=16+entries.length*15+6;
+              const panelW=155;
+              const px=crosshair.xPx+20+panelW>W?crosshair.xPx-panelW-10:crosshair.xPx+12;
+              const py=Math.max(M_.t,Math.min(M_.t+cH-panelH,M_.t+20));
+              return(
+                <g>
+                  <rect x={px} y={py} width={panelW} height={panelH}
+                    fill="#1a1d26" stroke="#333" rx={4} opacity={0.95}/>
+                  <text x={px+8} y={py+12} fill="#888e9a" fontSize={9}
+                    style={{fontFamily:"monospace"}}>Age {chAge} · {selYear}</text>
+                  {entries.map((ent,i)=>(
+                    <g key={ent.key}>
+                      <rect x={px+6} y={py+17+i*15} width={6} height={6} rx={1} fill={ent.color}/>
+                      <text x={px+16} y={py+23+i*15} fill="#888e9a" fontSize={9}
+                        style={{fontFamily:"monospace"}}>{ent.label}</text>
+                      <text x={px+panelW-8} y={py+23+i*15} textAnchor="end" fill="#e0e2e8" fontSize={9}
+                        fontWeight={600} style={{fontFamily:"monospace"}}>{fmtFull(ent.value)}</text>
+                    </g>
+                  ))}
+                </g>
+              );
+            })()}
+          </g>
+        )}
+      </svg>
+    );
+  };
+
+  // ── TIME SERIES VIEW ──
+  const renderTimeChart=()=>{
+    if(!data||!years.length)return null;
+
+    const vals=[];
+    years.forEach(yr=>{
+      const d=data.data[String(yr)]?.[String(selAge)];
+      if(!d)return;
+      selPerc.forEach(p=>{
+        const v=getVal(d,p);
+        if(v!=null)vals.push(real?inflate(v,yr):v);
+      });
+    });
+    if(!vals.length)return null;
+
+    const yMax=Math.max(...vals)*1.08;
+    const xS=yr=>M_.l+((yr-years[0])/(years[years.length-1]-years[0]))*cW;
+    const yS=v=>M_.t+cH-(v/yMax)*cH;
+    const step=yMax>500000?100000:yMax>200000?50000:yMax>100000?25000:10000;
+    const yTicks=[];for(let t=0;t<=yMax;t+=step)yTicks.push(t);
+
+    const chYr=crosshair?.xKey==='yr'?crosshair.xVal:null;
+    const chRecord=chYr!=null?data.data[String(chYr)]?.[String(selAge)]:null;
+
+    return(
+      <svg ref={svgRef} width={W} height={H} style={{display:"block",cursor:"crosshair"}}
+        onMouseMove={e=>handleSvgMove(e,years,xS,yS,'yr')}
+        onMouseLeave={()=>setCrosshair(null)}
+        onClick={()=>handleSvgClick('yr')}>
+        <rect x={M_.l} y={M_.t} width={cW} height={cH} fill="#13151d" rx={2}/>
+        {yTicks.map(t=>(
+          <g key={t}>
+            <line x1={M_.l} x2={W-M_.r} y1={yS(t)} y2={yS(t)} stroke="#222530" strokeWidth={0.5}/>
+            <text x={M_.l-8} y={yS(t)+4} textAnchor="end" fill="#4a5060" fontSize={10}
+              style={{fontFamily:"monospace"}}>{fmt(t)}</text>
+          </g>
+        ))}
+        {years.filter(y=>y%5===0||(years.length<15)||isEstYear(y)).map(y=>(
+          <text key={y} x={xS(y)} y={H-8} textAnchor="middle" fill={isEstYear(y)?"#a09060":"#4a5060"} fontSize={10}
+            style={{fontFamily:"monospace",fontStyle:isEstYear(y)?"italic":"normal"}}>{y}{isEstYear(y)?"*":""}</text>
+        ))}
+        {RECESSIONS.map(([s,e])=>{
+          if(s<years[0]||e>years[years.length-1])return null;
+          return<rect key={s} x={xS(s)-2} y={M_.t} width={Math.max(xS(e)-xS(s)+4,6)}
+            height={cH} fill="#ff3333" opacity={0.06} rx={2}/>;
+        })}
+        {/* Estimated year shaded bands */}
+        {years.filter(y=>isEstYear(y)).map(y=>{
+          const halfGap=years.length>1?Math.max((xS(years[1])-xS(years[0]))/2,4):8;
+          return<rect key={"est"+y} x={xS(y)-halfGap} y={M_.t} width={halfGap*2}
+            height={cH} fill="#f0c040" opacity={0.04} rx={2}/>;
+        })}
+        {selPerc.map(p=>{
+          const meta=percMeta[p];if(!meta)return null;
+          const pts=years.filter(yr=>{
+            const d=data.data[String(yr)]?.[String(selAge)];
+            return d&&getVal(d,p)!=null;
+          }).map(yr=>{
+            const v=getVal(data.data[String(yr)][String(selAge)],p);
+            return{yr,v:real?inflate(v,yr):v,est:isEstYear(yr)};
+          });
+          if(!pts.length)return null;
+
+          // Split line into solid segments and dashed (estimated) segments
+          // A segment is dashed if EITHER endpoint is estimated
+          const segments=[];
+          for(let i=1;i<pts.length;i++){
+            const isDashed=pts[i-1].est||pts[i].est;
+            segments.push({from:pts[i-1],to:pts[i],dashed:isDashed});
+          }
+
+          return(
+            <g key={p}>
+              {segments.map((seg,i)=>(
+                <line key={i}
+                  x1={xS(seg.from.yr)} y1={yS(seg.from.v)}
+                  x2={xS(seg.to.yr)} y2={yS(seg.to.v)}
+                  stroke={meta.color}
+                  strokeWidth={meta.isCustom?2:2.5}
+                  strokeLinejoin="round"
+                  strokeDasharray={seg.dashed?"6,4":(meta.isCustom?"6,3":"none")}
+                  opacity={seg.dashed?0.65:1}
+                />
+              ))}
+              {pts.map(d=>(
+                <circle key={d.yr} cx={xS(d.yr)} cy={yS(d.v)} r={2.5}
+                  fill={d.est?"none":meta.color}
+                  stroke={d.est?meta.color:"#0e1017"}
+                  strokeWidth={d.est?1.5:1}
+                  strokeDasharray={d.est?"2,2":"none"}/>
+              ))}
+              <text x={W-M_.r+5} y={yS(pts[pts.length-1].v)+4} fill={meta.color} fontSize={9}
+                style={{fontFamily:"monospace"}}>{meta.label}</text>
+            </g>
+          );
+        })}
+
+        {/* Pinned markers */}
+        {renderPins(xS,yS)}
+
+        {/* ── CROSSHAIR ── */}
+        {chYr!=null&&(
+          <g>
+            <line x1={crosshair.xPx} x2={crosshair.xPx} y1={M_.t} y2={M_.t+cH}
+              stroke="#888" strokeWidth={1} strokeDasharray="2,2" opacity={0.6}/>
+            <text x={crosshair.xPx} y={M_.t-6} textAnchor="middle" fill="#e0e2e8" fontSize={10}
+              fontWeight={700} style={{fontFamily:"monospace"}}>{chYr}{isEstYear(chYr)?" (est.)":""}</text>
+            {selPerc.map(p=>{
+              const meta=percMeta[p];if(!meta)return null;
+              const rawV=getVal(chRecord,p);if(rawV==null)return null;
+              const v=real?inflate(rawV,chYr):rawV;
+              return<circle key={p+"ch"} cx={crosshair.xPx} cy={yS(v)} r={4}
+                fill={meta.color} stroke="#0e1017" strokeWidth={2}/>;
+            })}
+            {chRecord&&(()=>{
+              const entries=selPerc.map(p=>{
+                const meta=percMeta[p];if(!meta)return null;
+                const rawV=getVal(chRecord,p);if(rawV==null)return null;
+                const v=real?inflate(rawV,chYr):rawV;
+                return{key:p,label:meta.label,color:meta.color,value:v};
+              }).filter(Boolean).sort((a,b)=>b.value-a.value);
+              if(!entries.length)return null;
+              const panelH=16+(isEstYear(chYr)?12:0)+entries.length*15+6;
+              const panelW=155;
+              const px=crosshair.xPx+20+panelW>W?crosshair.xPx-panelW-10:crosshair.xPx+12;
+              const py=Math.max(M_.t,Math.min(M_.t+cH-panelH,M_.t+20));
+              return(
+                <g>
+                  <rect x={px} y={py} width={panelW} height={panelH}
+                    fill="#1a1d26" stroke={isEstYear(chYr)?"#3d3520":"#333"} rx={4} opacity={0.95}/>
+                  <text x={px+8} y={py+12} fill="#888e9a" fontSize={9}
+                    style={{fontFamily:"monospace"}}>Age {selAge} · {chYr}{isEstYear(chYr)?" (est.)":""}</text>
+                  {isEstYear(chYr)&&<text x={px+8} y={py+22} fill="#a09060" fontSize={7}
+                    style={{fontFamily:"monospace"}}>Projected estimate</text>}
+                  {(()=>{const yOff=isEstYear(chYr)?12:0;return entries.map((ent,i)=>(
+                    <g key={ent.key}>
+                      <rect x={px+6} y={py+17+yOff+i*15} width={6} height={6} rx={1} fill={ent.color}/>
+                      <text x={px+16} y={py+23+yOff+i*15} fill="#888e9a" fontSize={9}
+                        style={{fontFamily:"monospace"}}>{ent.label}</text>
+                      <text x={px+panelW-8} y={py+23+yOff+i*15} textAnchor="end" fill="#e0e2e8" fontSize={9}
+                        fontWeight={600} style={{fontFamily:"monospace"}}>{fmtFull(ent.value)}</text>
+                    </g>
+                  ));})()}
+                </g>
+              );
+            })()}
+          </g>
+        )}
+      </svg>
+    );
+  };
+
+  // ── COHORT VIEW ──
+  const renderCohortChart=()=>{
+    if(!data||!cohortData.length)return null;
+
+    // Compute global age range and y-max
+    let gMinAge=999,gMaxAge=0;
+    const allVals=[];
+    cohortData.forEach(c=>{
+      c.series.forEach(s=>{
+        s.points.forEach(pt=>{
+          if(pt.age<gMinAge)gMinAge=pt.age;
+          if(pt.age>gMaxAge)gMaxAge=pt.age;
+          allVals.push(real?pt.realVal:pt.rawVal);
+        });
+      });
+    });
+    if(!allVals.length)return null;
+    const yMax=Math.max(...allVals)*1.08;
+    const xS=a=>M_.l+((a-gMinAge)/(gMaxAge-gMinAge||1))*cW;
+    const yS=v=>M_.t+cH-(v/yMax)*cH;
+    const step=yMax>500000?100000:yMax>200000?50000:yMax>100000?25000:10000;
+    const yTicks=[];for(let t=0;t<=yMax;t+=step)yTicks.push(t);
+
+    // All unique ages for crosshair snap
+    const allAges=[...new Set(cohortData.flatMap(c=>c.ages))].sort((a,b)=>a-b);
+
+    // Crosshair
+    const chAge=crosshair?.xKey==='cohortAge'?crosshair.xVal:null;
+
+    // Percentile line style
+    const percDash=(pk)=>{
+      const n=percMeta[pk]?.num;
+      if(n===50)return"none";
+      if(n!=null&&n<50)return"6,4";
+      return"3,3";
+    };
+    const percWidth=(pk)=>percMeta[pk]?.num===50?2.5:1.8;
+
+    // Snap helper (used for drag start)
+    const snapAge=(mx)=>{
+      let best=null,bestD=Infinity;
+      allAges.forEach(a=>{const d=Math.abs(xS(a)-mx);if(d<bestD){bestD=d;best=a;}});
+      return bestD<40?best:null;
+    };
+
+    return(
+      <svg ref={svgRef} width={W} height={H} style={{display:"block",cursor:"crosshair"}}
+        onMouseMove={e=>handleSvgMove(e,allAges,xS,yS,'cohortAge')}
+        onMouseLeave={()=>setCrosshair(null)}
+        onClick={()=>handleSvgClick('cohortAge')}>
+        <rect x={M_.l} y={M_.t} width={cW} height={cH} fill="#13151d" rx={2}/>
+        {/* Y grid */}
+        {yTicks.map(t=>(
+          <g key={t}>
+            <line x1={M_.l} x2={W-M_.r} y1={yS(t)} y2={yS(t)} stroke="#222530" strokeWidth={0.5}/>
+            <text x={M_.l-8} y={yS(t)+4} textAnchor="end" fill="#4a5060" fontSize={10}
+              style={{fontFamily:"monospace"}}>{fmt(t)}</text>
+          </g>
+        ))}
+        {/* X labels */}
+        {allAges.filter(a=>a%5===0).map(a=>(
+          <text key={a} x={xS(a)} y={H-8} textAnchor="middle" fill="#4a5060" fontSize={10}
+            style={{fontFamily:"monospace"}}>{a}</text>
+        ))}
+        {/* Cumulative range overlay */}
+        {cumRange&&(
+          <g>
+            <rect x={xS(cumRange.startAge)} y={M_.t}
+              width={Math.max(xS(cumRange.endAge)-xS(cumRange.startAge),2)} height={cH}
+              fill="#40a0f0" opacity={0.08} rx={2}/>
+            <line x1={xS(cumRange.startAge)} x2={xS(cumRange.startAge)} y1={M_.t} y2={M_.t+cH}
+              stroke="#40a0f0" strokeWidth={1} opacity={0.5}/>
+            <line x1={xS(cumRange.endAge)} x2={xS(cumRange.endAge)} y1={M_.t} y2={M_.t+cH}
+              stroke="#40a0f0" strokeWidth={1} opacity={0.5}/>
+            <text x={xS(cumRange.startAge)} y={M_.t-4} textAnchor="middle" fill="#40a0f0" fontSize={8}
+              style={{fontFamily:"monospace"}}>Age {cumRange.startAge}</text>
+            <text x={xS(cumRange.endAge)} y={M_.t-4} textAnchor="middle" fill="#40a0f0" fontSize={8}
+              style={{fontFamily:"monospace"}}>Age {cumRange.endAge}</text>
+          </g>
+        )}
+        {/* Data lines */}
+        {cohortData.map(c=>{
+          const col=cohortColor(c.idx);
+          return c.series.map(s=>{
+            const pts=s.points;
+            if(!pts.length)return null;
+            // Segment-based rendering for estimated year dashing
+            const segs=[];
+            for(let i=1;i<pts.length;i++){
+              segs.push({from:pts[i-1],to:pts[i],est:pts[i-1].isEst||pts[i].isEst});
+            }
+            return(
+              <g key={c.birthYear+"-"+s.pkey}>
+                {segs.map((seg,i)=>{
+                  const v1=real?seg.from.realVal:seg.from.rawVal;
+                  const v2=real?seg.to.realVal:seg.to.rawVal;
+                  return<line key={i}
+                    x1={xS(seg.from.age)} y1={yS(v1)} x2={xS(seg.to.age)} y2={yS(v2)}
+                    stroke={col} strokeWidth={percWidth(s.pkey)} strokeLinejoin="round"
+                    strokeDasharray={seg.est?"4,4":percDash(s.pkey)}
+                    opacity={seg.est?0.5:0.85}/>;
+                })}
+                {pts.map(pt=>{
+                  const v=real?pt.realVal:pt.rawVal;
+                  return<circle key={pt.age} cx={xS(pt.age)} cy={yS(v)} r={2}
+                    fill={pt.isEst?"none":col} stroke={pt.isEst?col:"#0e1017"}
+                    strokeWidth={pt.isEst?1.2:0.8}/>;
+                })}
+                {/* Right label */}
+                {pts.length>0&&(()=>{
+                  const last=pts[pts.length-1];
+                  const v=real?last.realVal:last.rawVal;
+                  const label=cohorts.length>1?`${c.birthYear}`:`${c.birthYear} ${s.meta.label}`;
+                  return<text x={W-M_.r+5} y={yS(v)+4} fill={col} fontSize={8}
+                    style={{fontFamily:"monospace"}}>{label}</text>;
+                })()}
+              </g>
+            );
+          });
+        })}
+        {/* Legend */}
+        <g>
+          {cohortData.map((c,i)=>{
+            const col=cohortColor(c.idx);
+            const lx=M_.l+8+i*72;
+            return(
+              <g key={c.birthYear}>
+                <circle cx={lx} cy={M_.t+12} r={4} fill={col}/>
+                <text x={lx+8} y={M_.t+15} fill={col} fontSize={9}
+                  style={{fontFamily:"monospace"}}>{c.birthYear}</text>
+              </g>
+            );
+          })}
+          {cohortPerc.length>1&&cohortPerc.map((pk,i)=>{
+            const meta=percMeta[pk];if(!meta)return null;
+            const lx=M_.l+8+cohortData.length*72+i*70;
+            return(
+              <g key={pk}>
+                <line x1={lx} x2={lx+14} y1={M_.t+12} y2={M_.t+12}
+                  stroke="#888" strokeWidth={percWidth(pk)} strokeDasharray={percDash(pk)}/>
+                <text x={lx+18} y={M_.t+15} fill="#888e9a" fontSize={8}
+                  style={{fontFamily:"monospace"}}>{meta.label}</text>
+              </g>
+            );
+          })}
+        </g>
+        {/* Pinned markers */}
+        {renderPins(xS,yS)}
+        {/* ── CROSSHAIR ── */}
+        {chAge!=null&&(
+          <g>
+            <line x1={crosshair.xPx} x2={crosshair.xPx} y1={M_.t} y2={M_.t+cH}
+              stroke="#888" strokeWidth={1} strokeDasharray="2,2" opacity={0.6}/>
+            <text x={crosshair.xPx} y={M_.t-6} textAnchor="middle" fill="#e0e2e8" fontSize={10}
+              fontWeight={700} style={{fontFamily:"monospace"}}>Age {chAge}</text>
+            {/* Dots on lines */}
+            {cohortData.map(c=>{
+              const col=cohortColor(c.idx);
+              return c.series.map(s=>{
+                const pt=s.points.find(p=>p.age===chAge);
+                if(!pt)return null;
+                const v=real?pt.realVal:pt.rawVal;
+                return<circle key={c.birthYear+"-"+s.pkey+"ch"} cx={crosshair.xPx} cy={yS(v)} r={4}
+                  fill={col} stroke="#0e1017" strokeWidth={2}/>;
+              });
+            })}
+            {/* Tooltip panel */}
+            {(()=>{
+              const entries=[];
+              cohortData.forEach(c=>{
+                const col=cohortColor(c.idx);
+                c.series.forEach(s=>{
+                  const pt=s.points.find(p=>p.age===chAge);
+                  if(!pt)return;
+                  const v=real?pt.realVal:pt.rawVal;
+                  entries.push({key:c.birthYear+"-"+s.pkey,cohort:c.birthYear,calYear:pt.calYear,
+                    label:s.meta.label,color:col,value:v,isEst:pt.isEst});
+                });
+              });
+              if(!entries.length)return null;
+              const panelH=8+entries.length*15+6;
+              const panelW=200;
+              const px=crosshair.xPx+20+panelW>W?crosshair.xPx-panelW-10:crosshair.xPx+12;
+              const py=Math.max(M_.t,Math.min(M_.t+cH-panelH,M_.t+20));
+              return(
+                <g>
+                  <rect x={px} y={py} width={panelW} height={panelH}
+                    fill="#1a1d26" stroke="#333" rx={4} opacity={0.95}/>
+                  {entries.map((ent,i)=>(
+                    <g key={ent.key}>
+                      <rect x={px+6} y={py+7+i*15} width={6} height={6} rx={1} fill={ent.color}/>
+                      <text x={px+16} y={py+13+i*15} fill="#888e9a" fontSize={8}
+                        style={{fontFamily:"monospace"}}>b.{ent.cohort} {ent.label} ({ent.calYear}{ent.isEst?"*":""})</text>
+                      <text x={px+panelW-8} y={py+13+i*15} textAnchor="end" fill="#e0e2e8" fontSize={9}
+                        fontWeight={600} style={{fontFamily:"monospace"}}>{fmtFull(ent.value)}</text>
+                    </g>
+                  ))}
+                </g>
+              );
+            })()}
+          </g>
+        )}
+      </svg>
+    );
+  };
+
+  // ── NO DATA STATE ──
+  if(!data){
+    return(
+      <div style={{display:"flex",justifyContent:"center",alignItems:"center",
+        minHeight:"100vh",padding:"40px 20px"}}
+        onDragOver={e=>{e.preventDefault();e.stopPropagation();}}
+        onDrop={handleDrop}>
+        <div style={{maxWidth:600,textAlign:"center"}}>
+          <h1 style={{fontSize:22,fontWeight:700,color:"#e0e2e8",marginBottom:16}}>
+            Income Percentile Explorer
+          </h1>
+          <p style={{fontSize:14,color:"#888e9a",lineHeight:1.7,marginBottom:24}}>
+            Load your <code>income_percentiles.json</code> file generated by the processing script.
+          </p>
+          <label style={{
+            display:"inline-block",padding:"12px 28px",background:"#f0c040",color:"#0e1017",
+            fontWeight:700,fontSize:14,borderRadius:6,cursor:"pointer",
+          }}>
+            Load JSON Data
+            <input type="file" accept=".json" onChange={handleFile}
+              style={{display:"none"}}/>
+          </label>
+          <p style={{fontSize:12,color:"#555a65",marginTop:16}}>
+            or drag &amp; drop the file anywhere on this page
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── MAIN UI ──
+  const latestYear=selYear||years[years.length-1];
+  const compareYear=cmpYear||years[0];
+  const yd=data.data[String(latestYear)]||{};
+  const focusStats=yd[String(selAge)];
+
+  return(
+    <div style={{padding:"20px 16px"}}>
+      <div style={{maxWidth:880,margin:"0 auto"}}>
+
+        <div style={{marginBottom:20,borderBottom:"1px solid #1e2230",paddingBottom:14}}>
+          <h1 style={{fontSize:20,fontWeight:700,color:"#e0e2e8",margin:0}}>
+            U.S. Individual Income by Age &amp; Percentile
+          </h1>
+          <p style={{fontSize:11,color:"#4a5060",margin:"5px 0 0",lineHeight:1.6}}>
+            {data.metadata?.source||"IPUMS-CPS"} &middot;{" "}
+            {years.length} years ({years[0]}&ndash;{years[years.length-1]}) &middot;{" "}
+            {afterTax?"After-tax":"Pre-tax (gross)"} &middot;{" "}
+            {real?` ${BASE_CPI_YEAR} dollars (CPI-U adjusted)`:" Nominal dollars"} &middot;{" "}
+            {mode==="age"?` ${yrLabel(latestYear)}`:mode==="time"?` Age ${selAge}`:` Cohorts: ${cohorts.join(", ")}`}
+          </p>
+        </div>
+
+        {/* Controls */}
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:14,alignItems:"center",rowGap:8}}>
+          <div style={{display:"flex",gap:2,background:"#13151d",borderRadius:6,padding:2}}>
+            {[["age","By Age"],["time","Over Time"],["cohort","Cohort"]].map(([v,l])=>(
+              <button key={v} onClick={()=>{setMode(v);clearPins();setCumRange(null);setDragStartAge(null);}} style={{
+                padding:"5px 14px",fontSize:12,fontWeight:600,border:"none",borderRadius:5,cursor:"pointer",
+                background:mode===v?"#f0c040":"transparent",color:mode===v?"#0e1017":"#4a5060"
+              }}>{l}</button>
+            ))}
+          </div>
+
+          {mode!=="cohort"&&(
+            <div style={{display:"flex",alignItems:"center",gap:6,background:"#13151d",padding:"4px 12px",borderRadius:6}}>
+              <span style={{fontSize:10,color:"#4a5060",textTransform:"uppercase"}}>Age</span>
+              <input type="range" min={ages[0]||16} max={ages[ages.length-1]||75} value={selAge}
+                onChange={e=>setSelAge(+e.target.value)} style={{width:120}}/>
+              <span style={{fontSize:15,fontWeight:700,color:"#f0c040",fontFamily:"monospace",minWidth:24}}>{selAge}</span>
+            </div>
+          )}
+
+          {mode==="age"&&years.length>1&&(
+            <div style={{display:"flex",alignItems:"center",gap:6,background:"#13151d",padding:"4px 12px",borderRadius:6}}>
+              <span style={{fontSize:10,color:"#4a5060",textTransform:"uppercase"}}>Year</span>
+              <input type="range" min={years[0]} max={years[years.length-1]} step={1} value={selYear||years[years.length-1]}
+                onChange={e=>{const v=+e.target.value;const snapped=years.reduce((a,b)=>Math.abs(b-v)<Math.abs(a-v)?b:a);setSelYear(snapped);}}
+                style={{width:160}}/>
+              <span style={{fontSize:15,fontWeight:700,color:isEstYear(latestYear)?"#d0a830":"#f0c040",fontFamily:"monospace",minWidth:40}}>
+                {latestYear}{isEstYear(latestYear)?"*":""}
+              </span>
+            </div>
+          )}
+
+          <button onClick={()=>setReal(!real)} style={{
+            padding:"5px 12px",fontSize:11,fontWeight:600,border:"1px solid #222530",borderRadius:5,cursor:"pointer",
+            background:real?"#1a2e1a":"#13151d",color:real?"#7ec87e":"#4a5060",
+            minWidth:90,textAlign:"center"
+          }}>{real?`Real ${BASE_CPI_YEAR}$`:"Nominal $"}</button>
+
+          {hasAfterTax&&(
+            <button onClick={()=>setAfterTax(!afterTax)} style={{
+              padding:"5px 12px",fontSize:11,fontWeight:600,border:"1px solid #222530",borderRadius:5,cursor:"pointer",
+              background:afterTax?"#1a1a2e":"#13151d",color:afterTax?"#8888e8":"#4a5060",
+              minWidth:80,textAlign:"center"
+            }}>{afterTax?"After Tax":"Pre-Tax"}</button>
+          )}
+
+          {estimatedYears.size>0&&(
+            <button onClick={()=>setShowEstimated(!showEstimated)} style={{
+              padding:"5px 12px",fontSize:11,fontWeight:600,border:"1px solid #222530",borderRadius:5,cursor:"pointer",
+              background:showEstimated?"#2a2510":"#13151d",color:showEstimated?"#f0c040":"#4a5060",
+              minWidth:105,textAlign:"center"
+            }}>{showEstimated?"Est. years on":"Est. years off"}</button>
+          )}
+
+          {mode!=="cohort"&&focusStats&&(
+            <span style={{marginLeft:"auto",fontSize:10,color:isEstYear(latestYear)?"#a09060":"#3a4050",fontFamily:"monospace"}}>
+              {isEstYear(latestYear)
+                ?<>&#9888; Estimated &middot; {((focusStats.est_workforce||0)/1e6).toFixed(1)}M workers</>
+                :<>n={focusStats.n_samples?.toLocaleString()} &middot; {((focusStats.est_workforce||0)/1e6).toFixed(1)}M workers</>}
+            </span>
+          )}
+        </div>
+
+        {/* Cohort controls */}
+        {mode==="cohort"&&(
+          <div style={{marginBottom:10}}>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8,alignItems:"center"}}>
+              <span style={{fontSize:10,color:"#4a5060",marginRight:4}}>Birth years:</span>
+              {cohorts.map((byr,i)=>{
+                const r=cohortAgeRange(byr);
+                return(
+                  <span key={byr} style={{display:"inline-flex",alignItems:"center",gap:3,
+                    padding:"3px 8px 3px 10px",fontSize:10,fontWeight:600,borderRadius:3,
+                    fontFamily:"monospace",background:cohortColor(i),color:"#0e1017"}}>
+                    <span>{byr}</span>
+                    <span style={{fontSize:8,opacity:0.7,marginLeft:2}}>{r?`${r.minAge}-${r.maxAge}`:""}</span>
+                    <span onClick={()=>removeCohort(byr)}
+                      style={{fontSize:12,opacity:0.6,cursor:"pointer",marginLeft:2}}>&times;</span>
+                  </span>
+                );
+              })}
+              <input type="number" min={1920} max={2009} value={cohortInput}
+                onChange={e=>setCohortInput(e.target.value)}
+                onKeyDown={e=>{if(e.key==='Enter')addCohort();}}
+                placeholder="e.g. 1985"
+                style={{width:80,padding:"4px 8px",fontSize:11,fontFamily:"monospace",
+                  background:"#13151d",color:"#c8cdd5",border:"1px solid #222530",borderRadius:4}}/>
+              <button onClick={addCohort} style={{
+                padding:"4px 10px",fontSize:10,fontWeight:600,border:"1px solid #333",borderRadius:4,
+                cursor:"pointer",background:"#1a1d26",color:"#7ec87e"
+              }}>Add</button>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8,alignItems:"center"}}>
+              <span style={{fontSize:10,color:"#4a5060",marginRight:4}}>Percentiles:</span>
+              {availPerc.map(p=>{
+                const meta=percMeta[p];
+                return(
+                  <button key={p} onClick={()=>toggleCohortPerc(p)} style={{
+                    padding:"4px 12px",fontSize:10,fontWeight:600,border:"none",borderRadius:3,cursor:"pointer",
+                    fontFamily:"monospace",
+                    background:cohortPerc.includes(p)?meta?.color||"#555":"#13151d",
+                    color:cohortPerc.includes(p)?"#fff":"#4a5060",
+                    opacity:cohortPerc.includes(p)?1:0.5
+                  }}>{meta?.label||p}</button>
+                );
+              })}
+              {customPercentiles.map(c=>(
+                <span key={c.key} style={{display:"inline-flex",alignItems:"center",gap:4,
+                  padding:"3px 8px 3px 10px",fontSize:10,fontWeight:600,borderRadius:3,
+                  fontFamily:"monospace",cursor:"pointer",
+                  background:cohortPerc.includes(c.key)?c.color:"#13151d",
+                  color:cohortPerc.includes(c.key)?"#fff":"#4a5060",
+                  opacity:cohortPerc.includes(c.key)?1:0.5
+                }}>
+                  <span onClick={()=>toggleCohortPerc(c.key)}>{c.label}</span>
+                  <span onClick={()=>removeCustomPercentile(c.key)}
+                    style={{fontSize:12,opacity:0.6,cursor:"pointer",marginLeft:2}}>&times;</span>
+                </span>
+              ))}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+              <span style={{fontSize:10,color:"#4a5060"}}>Add percentile:</span>
+              <input type="number" min={0} max={100} step={1} value={customPInput}
+                onChange={e=>setCustomPInput(e.target.value)}
+                onKeyDown={e=>{if(e.key==='Enter')addCustomPercentile();}}
+                placeholder="e.g. 27"
+                style={{width:72,padding:"4px 8px",fontSize:11,fontFamily:"monospace",
+                  background:"#13151d",color:"#c8cdd5",border:"1px solid #222530",borderRadius:4}}/>
+              <button onClick={addCustomPercentile} style={{
+                padding:"4px 10px",fontSize:10,fontWeight:600,border:"1px solid #333",borderRadius:4,
+                cursor:"pointer",background:"#1a1d26",color:"#7ec87e"
+              }}>Add</button>
+              {customPercentiles.length>0&&(
+                <span style={{fontSize:9,color:"#4a5060",fontStyle:"italic",marginLeft:4}}>
+                  (interpolated from precomputed anchors)
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Percentile toggles (non-cohort) */}
+        {mode!=="cohort"&&(
+          <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8,alignItems:"center"}}>
+            {availPerc.map(p=>{
+              const meta=percMeta[p];
+              return(
+                <button key={p} onClick={()=>toggle(p)} style={{
+                  padding:"4px 12px",fontSize:10,fontWeight:600,border:"none",borderRadius:3,cursor:"pointer",
+                  fontFamily:"monospace",
+                  background:selPerc.includes(p)?meta?.color||"#555":"#13151d",
+                  color:selPerc.includes(p)?"#fff":"#4a5060",
+                  opacity:selPerc.includes(p)?1:0.5
+                }}>{meta?.label||p}</button>
+              );
+            })}
+            {customPercentiles.map(c=>(
+              <span key={c.key} style={{display:"inline-flex",alignItems:"center",gap:4,
+                padding:"3px 8px 3px 10px",fontSize:10,fontWeight:600,borderRadius:3,
+                fontFamily:"monospace",cursor:"pointer",
+                background:selPerc.includes(c.key)?c.color:"#13151d",
+                color:selPerc.includes(c.key)?"#fff":"#4a5060",
+                opacity:selPerc.includes(c.key)?1:0.5
+              }}>
+                <span onClick={()=>toggle(c.key)}>{c.label}</span>
+                <span onClick={()=>removeCustomPercentile(c.key)}
+                  style={{fontSize:12,opacity:0.6,cursor:"pointer",marginLeft:2}}>&times;</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Custom percentile input (non-cohort) */}
+        {mode!=="cohort"&&(
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:14}}>
+            <span style={{fontSize:10,color:"#4a5060"}}>Add percentile:</span>
+            <input type="number" min={0} max={100} step={1} value={customPInput}
+              onChange={e=>setCustomPInput(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter')addCustomPercentile();}}
+              placeholder="e.g. 27"
+              style={{width:72,padding:"4px 8px",fontSize:11,fontFamily:"monospace",
+                background:"#13151d",color:"#c8cdd5",border:"1px solid #222530",borderRadius:4}}/>
+            <button onClick={addCustomPercentile} style={{
+              padding:"4px 10px",fontSize:10,fontWeight:600,border:"1px solid #333",borderRadius:4,
+              cursor:"pointer",background:"#1a1d26",color:"#7ec87e"
+            }}>Add</button>
+            {customPercentiles.length>0&&(
+              <span style={{fontSize:9,color:"#4a5060",fontStyle:"italic",marginLeft:4}}>
+                (interpolated from precomputed anchors)
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Estimated year banner */}
+        {mode==="age"&&isEstYear(latestYear)&&(
+          <div style={{background:"linear-gradient(90deg,#2a2510,#1e1a0e)",border:"1px solid #3d3520",
+            borderRadius:6,padding:"8px 14px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:14}}>&#9888;</span>
+            <div>
+              <span style={{fontSize:12,fontWeight:700,color:"#f0c040"}}>{latestYear} (Estimated)</span>
+              <span style={{fontSize:11,color:"#a09060",marginLeft:8}}>
+                Projected from {latestYear-1} ASEC using BLS age-differentiated wage growth factors
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Chart */}
+        <div style={{background:"#11131b",borderRadius:8,padding:"8px 4px 4px",border:"1px solid #1e2230",marginBottom:8,overflowX:"auto"}}>
+          <div style={{minWidth:W}}>
+            {mode==="age"?renderAgeChart():mode==="time"?renderTimeChart():renderCohortChart()}
+          </div>
+        </div>
+
+        {/* Pin hint or comparison panel */}
+        {renderPinHint()}
+        {renderComparePanel()}
+
+        {/* Cohort: cumulative earnings panel */}
+        {mode==="cohort"&&(
+          <div style={{marginBottom:12}}>
+            {cumEarnings&&cumRange&&(
+              <div style={{background:"#11131b",borderRadius:8,border:"1px solid #1e2230",padding:"14px 16px",marginBottom:16}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#e0e2e8"}}>
+                    Cumulative Earnings: Ages {cumRange.startAge}&ndash;{cumRange.endAge}
+                  </div>
+                  <button onClick={()=>setCumRange(null)} style={{
+                    padding:"3px 10px",fontSize:10,fontWeight:600,border:"1px solid #333",borderRadius:4,
+                    cursor:"pointer",background:"#1a1d26",color:"#888e9a"
+                  }}>Clear range</button>
+                </div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #222530"}}>
+                      <th style={{textAlign:"left",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Cohort</th>
+                      <th style={{textAlign:"left",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Percentile</th>
+                      <th style={{textAlign:"right",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Nominal Total</th>
+                      <th style={{textAlign:"right",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Real ({BASE_CPI_YEAR}$)</th>
+                      <th style={{textAlign:"right",padding:"5px 8px",color:"#4a5060",fontWeight:600}}>Coverage</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cumEarnings.map(ce=>ce.percResults.map(pr=>(
+                      <tr key={ce.birthYear+"-"+pr.pkey} style={{borderBottom:"1px solid #161820"}}>
+                        <td style={{padding:"4px 8px"}}>
+                          <span style={{display:"inline-block",width:8,height:8,borderRadius:2,background:ce.color,marginRight:6,verticalAlign:"middle"}}/>
+                          <span style={{color:"#c0c5d0"}}>{ce.birthYear}</span>
+                        </td>
+                        <td style={{padding:"4px 8px",color:"#888e9a"}}>{pr.label}</td>
+                        <td style={{textAlign:"right",padding:"4px 8px",color:"#c0c5d0",fontWeight:600}}>
+                          {fmtFull(pr.nomSum)}{pr.hasEst?<span style={{color:"#a09060",fontSize:8}}> *</span>:""}
+                        </td>
+                        <td style={{textAlign:"right",padding:"4px 8px",color:"#7ec87e",fontWeight:600}}>
+                          {fmtFull(pr.realSum)}{pr.hasEst?<span style={{color:"#a09060",fontSize:8}}> *</span>:""}
+                        </td>
+                        <td style={{textAlign:"right",padding:"4px 8px",color:pr.missing>0?"#d04535":"#4a5060"}}>
+                          {pr.count}/{pr.span}{pr.missing>0?` (${pr.missing} missing)`:""}
+                        </td>
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
+                <div style={{fontSize:9,color:"#3a4050",marginTop:8}}>
+                  Nominal = sum of raw annual income. Real = each year adjusted to {BASE_CPI_YEAR} dollars, then summed.
+                  {cumEarnings.some(ce=>ce.percResults.some(pr=>pr.hasEst))&&
+                    <span style={{color:"#a09060"}}> * Includes estimated year data.</span>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Stats cards for selected age (non-cohort) */}
+        {mode!=="cohort"&&focusStats&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:7,marginBottom:16}}>
+            {selPerc.filter(p=>{const v=getVal(focusStats,p);return v!=null;}).map(p=>{
+              const meta=percMeta[p];if(!meta)return null;
+              const rawV=getVal(focusStats,p);
+              const v=real?inflate(rawV,latestYear):rawV;
+              return(
+                <div key={p} style={{background:"#11131b",borderRadius:5,padding:"8px 10px",borderLeft:`3px solid ${meta.color}`}}>
+                  <div style={{fontSize:9,color:"#4a5060",textTransform:"uppercase",letterSpacing:"0.05em"}}>{meta.label}{meta.isCustom?" ~":""}</div>
+                  <div style={{fontSize:16,fontWeight:700,color:"#e0e2e8",fontFamily:"monospace"}}>
+                    {fmtFull(v)}
+                    {isEstYear(latestYear)&&<span style={{fontSize:8,color:"#a09060",marginLeft:4,fontWeight:400}}>(est.)</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Data table */}
+        <details>
+          <summary style={{fontSize:12,color:"#4a5060",padding:"8px 0",borderTop:"1px solid #1e2230"}}>
+            Full data table
+          </summary>
+          <div style={{overflowX:"auto",marginTop:6}}>
+            {mode==="cohort"?(
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:"monospace"}}>
+                <thead>
+                  <tr style={{borderBottom:"1px solid #222530"}}>
+                    <th style={{textAlign:"left",padding:"4px 6px",color:"#4a5060"}}>Age</th>
+                    {cohortData.map(c=>
+                      c.series.map(s=>(
+                        <th key={c.birthYear+"-"+s.pkey} style={{textAlign:"right",padding:"4px 6px",color:cohortColor(c.idx)}}>
+                          {c.birthYear} {s.meta.label}
+                        </th>
+                      ))
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(()=>{
+                    const allA=[...new Set(cohortData.flatMap(c=>c.ages))].sort((a,b)=>a-b);
+                    return allA.map((age,i)=>(
+                      <tr key={age} style={{borderBottom:"1px solid #161820",background:i%2===0?"transparent":"#0f1118"}}>
+                        <td style={{padding:"3px 6px",color:"#6a7080"}}>{age}</td>
+                        {cohortData.map(c=>
+                          c.series.map(s=>{
+                            const pt=s.points.find(p=>p.age===age);
+                            const v=pt?(real?pt.realVal:pt.rawVal):null;
+                            return(
+                              <td key={c.birthYear+"-"+s.pkey} style={{textAlign:"right",padding:"3px 6px",
+                                color:v!=null?"#c0c5d0":"#2a2d36"}}>
+                                {v!=null?fmtFull(v):"—"}{pt?.isEst?<span style={{color:"#a09060",fontSize:7}}> *</span>:""}
+                              </td>
+                            );
+                          })
+                        )}
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            ):(
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:"monospace"}}>
+                <thead>
+                  <tr style={{borderBottom:"1px solid #222530"}}>
+                    <th style={{textAlign:"left",padding:"4px 6px",color:"#4a5060"}}>Age</th>
+                    <th style={{textAlign:"right",padding:"4px 6px",color:"#4a5060"}}>n</th>
+                    {selPerc.map(p=>{
+                      const meta=percMeta[p];
+                      return<th key={p} style={{textAlign:"right",padding:"4px 6px",color:meta?.color||"#aaa"}}>{meta?.label||p}</th>;
+                    })}
+                    <th style={{textAlign:"right",padding:"4px 6px",color:"#5a6070"}}>Mean</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ages.map((age,i)=>{
+                    const d=yd[String(age)];
+                    if(!d)return null;
+                    return(
+                      <tr key={age} onClick={()=>setSelAge(age)} style={{
+                        cursor:"pointer",borderBottom:"1px solid #161820",
+                        background:age===selAge?"#181c28":i%2===0?"transparent":"#0f1118"
+                      }}>
+                        <td style={{padding:"3px 6px",color:age===selAge?"#f0c040":"#6a7080",fontWeight:age===selAge?700:400}}>{age}</td>
+                        <td style={{textAlign:"right",padding:"3px 6px",color:"#3a4050"}}>{d.n_samples}</td>
+                        {selPerc.map(p=>(
+                          <td key={p} style={{textAlign:"right",padding:"3px 6px",color:"#c0c5d0"}}>
+                            {fmtFull(real?inflate(getVal(d,p),latestYear):getVal(d,p))}
+                          </td>
+                        ))}
+                        <td style={{textAlign:"right",padding:"3px 6px",color:"#5a6070"}}>
+                          {(()=>{const m=afterTax?(d.at_mean??d.mean):d.mean;return fmtFull(real?inflate(m,latestYear):m);})()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </details>
+
+        {/* Methodology */}
+        <div style={{fontSize:10,color:"#3a4050",lineHeight:1.7,padding:"12px",background:"#11131b",
+          borderRadius:6,border:"1px solid #1e2230",marginTop:16}}>
+          <strong style={{color:"#6a7080"}}>Source</strong><br/>
+          {data.metadata?.citation||"IPUMS-CPS"}<br/><br/>
+          <strong style={{color:"#6a7080"}}>Methodology</strong><br/>
+          {data.metadata?.methodology?.income_variable||"INCTOT"} &middot;{" "}
+          Weight: {data.metadata?.methodology?.weight_variable||"ASECWT"} &middot;{" "}
+          {data.metadata?.methodology?.population||"Workers"} &middot;{" "}
+          {data.metadata?.methodology?.percentile_method||"Weighted percentiles"}<br/>
+          CPI-U adjustment base: {BASE_CPI_YEAR} &middot; Generated: {data.metadata?.generated_at||"—"}<br/>
+          {customPercentiles.length>0&&(
+            <span style={{color:"#6a7080"}}>
+              Note: Custom percentiles (marked ~) are interpolated between precomputed anchor points.<br/>
+            </span>
+          )}
+          {hasAfterTax&&(
+            <span style={{color:"#8888e8"}}>
+              <strong>After-tax model:</strong> Federal brackets (single filer, std deduction + personal exemption) + FICA (SS to wage base + Medicare) + avg state (~5%).
+              No credits (EITC, child, etc.). FICA applied to total income (approx for non-wage earners).
+              {data.metadata?.after_tax_model?.state_rate_used!=null&&` State rate: ${(data.metadata.after_tax_model.state_rate_used*100).toFixed(1)}%.`}
+              <br/>
+            </span>
+          )}
+          {estimatedYears.size>0&&(
+            <span style={{color:"#a09060"}}>
+              <strong>Estimated years:</strong> {[...estimatedYears].join(", ")} &mdash; projected from prior-year ASEC data using BLS age-differentiated wage growth factors.
+              Shown with dashed lines in time series, marked "(est.)" throughout.
+              Toggle visibility with the "Est. years" button.
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<IncomeExplorer/>);
+</script>
+</body>
+</html>
