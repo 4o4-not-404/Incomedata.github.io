@@ -33,6 +33,12 @@ import pandas as pd
 # ── CPI-U Annual Averages (BLS Series CUUR0000SA0) ──────────────────────
 # Used for inflation adjustment. Base year is configurable.
 CPI_U = {
+    1961: 29.9,  1962: 30.2,  1963: 30.6,  1964: 31.0,  1965: 31.5,
+    1966: 32.4,  1967: 33.4,  1968: 34.8,  1969: 36.7,  1970: 38.8,
+    1971: 40.5,  1972: 41.8,  1973: 44.4,  1974: 49.3,  1975: 53.8,
+    1976: 56.9,  1977: 60.6,  1978: 65.2,  1979: 72.6,  1980: 82.4,
+    1981: 90.9,  1982: 96.5,  1983: 99.6,  1984: 103.9, 1985: 107.6,
+    1986: 109.6, 1987: 113.6, 1988: 118.3, 1989: 124.0,
     1990: 130.7, 1991: 136.2, 1992: 140.3, 1993: 144.5, 1994: 148.2,
     1995: 152.4, 1996: 156.9, 1997: 160.5, 1998: 163.0, 1999: 166.6,
     2000: 172.2, 2001: 177.1, 2002: 179.9, 2003: 184.0, 2004: 188.9,
@@ -178,7 +184,9 @@ def filter_income(df, include_zero=False):
     n_before = len(df)
 
     # Exclude NIU and missing
-    df = df[~df['INCTOT'].isin([99999999, 99999998])].copy()
+    # 99999999 = N.I.U. (8 digits), 99999998 = Missing (8 digits)
+    # 999999999 = N.I.U. (9 digits), 999999998 = Missing (9 digits)
+    df = df[~df['INCTOT'].isin([99999999, 99999998, 999999999, 999999998])].copy()
 
     if include_zero:
         df = df[df['INCTOT'] >= 0].copy()
@@ -351,6 +359,8 @@ def main():
     else:
         candidates = [
             'cps_asec.csv.gz', 'cps_asec.csv', 'cps_asec.dat.gz',
+            'cps_00003.csv.gz', 'cps_00003.csv',  # latest IPUMS extract
+            'cps_00002.csv.gz', 'cps_00002.csv',
             'cps_00001.csv.gz', 'cps_00001.csv',  # IPUMS default naming
         ]
         filepath = None
